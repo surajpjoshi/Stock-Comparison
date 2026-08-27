@@ -8,43 +8,119 @@
 </head>
 <body>
 <div class="container">
+
 <header>
   <div>
     <h1>Stock Sector Comparison</h1>
-    <p class="subtitle">Daily relative performance • Starts from 0%</p>
+    <p class="subtitle">Daily relative performance • Stock ranking • Sector strength • Benchmarks</p>
   </div>
   <div id="latestDate" class="latest-date">Loading...</div>
 </header>
 
 <section class="controls">
-  <div class="control"><label for="sectorSelect">Sector</label><select id="sectorSelect"></select></div>
-  <div class="control"><label for="periodSelect">Period</label>
+  <div class="control">
+    <label for="sectorSelect">Sector</label>
+    <select id="sectorSelect"></select>
+  </div>
+
+  <div class="control">
+    <label for="periodSelect">Period</label>
     <select id="periodSelect">
-      <option value="1M">1M</option><option value="3M">3M</option>
-      <option value="6M">6M</option><option value="YTD">YTD</option>
+      <option value="1M">1M</option>
+      <option value="3M">3M</option>
+      <option value="6M">6M</option>
+      <option value="YTD">YTD</option>
     </select>
   </div>
-  <div class="control"><label for="stocksSelect">Stocks</label>
-    <select id="stocksSelect"><option value="5">Top 5</option><option value="10">Top 10</option></select>
+
+  <div class="control">
+    <label for="stocksSelect">Stocks</label>
+    <select id="stocksSelect">
+      <option value="5">Top 5</option>
+      <option value="10">Top 10</option>
+    </select>
+  </div>
+</section>
+
+<section class="benchmark-section">
+  <div class="section-heading">
+    <div>
+      <h2>Benchmark Performance</h2>
+      <p>Selected sector vs Nifty 50 and Nifty 500</p>
+    </div>
+    <div class="section-actions">
+      <span class="method-note">Price-return proxies are equal-weighted</span>
+      <button type="button" class="section-toggle" data-target="benchmarkBody">Hide</button>
+    </div>
+  </div>
+  <div id="benchmarkBody" class="section-body">
+    <div id="benchmarkCards" class="benchmark-cards"></div>
+  </div>
+</section>
+
+<section class="sector-strength-section">
+  <div class="section-heading">
+    <div>
+      <h2>Sector Strength</h2>
+      <p>Top 10 strongest → weakest sectors for the selected period</p>
+    </div>
+    <button type="button" class="section-toggle" data-target="sectorStrengthBody">Hide</button>
+  </div>
+  <div id="sectorStrengthBody" class="section-body">
+    <div id="sectorRanking" class="sector-ranking"></div>
   </div>
 </section>
 
 <section class="chart-card">
   <div class="chart-header">
-    <div><h2 id="chartTitle">Loading...</h2><span id="chartSubtitle"></span></div>
-    <div id="legend" class="legend"></div>
+    <div>
+      <h2 id="chartTitle">Loading...</h2>
+      <span id="chartSubtitle"></span>
+    </div>
+    <div class="section-actions">
+      <div id="legend" class="legend"></div>
+      <button type="button" class="section-toggle" data-target="chartBody">Hide</button>
+    </div>
   </div>
-  <div class="chart-wrap"><canvas id="chart"></canvas></div>
+  <div id="chartBody" class="section-body">
+    <div class="chart-wrap">
+      <canvas id="chart"></canvas>
+    </div>
+  </div>
 </section>
 
 <section class="table-card">
-<h2>Performance</h2>
-<div class="table-wrap">
-<table><thead><tr><th>Rank</th><th>Symbol</th><th>Company</th><th>Return</th></tr></thead>
-<tbody id="performanceTable"></tbody></table>
-</div>
+  <div class="section-heading">
+    <div>
+      <h2>Ranking Summary</h2>
+      <p>Top stocks in the selected sector, ranked by period return</p>
+    </div>
+    <div class="section-actions">
+      <span class="method-note">Vs Nifty 50 = stock return − Nifty 50 return</span>
+      <button type="button" class="section-toggle" data-target="rankingBody">Hide</button>
+    </div>
+  </div>
+
+  <div id="rankingBody" class="section-body">
+    <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Rank</th>
+          <th>Symbol</th>
+          <th>Company</th>
+          <th>Return</th>
+          <th>Vs Nifty 50</th>
+        </tr>
+      </thead>
+      <tbody id="performanceTable"></tbody>
+    </table>
+    </div>
+  </div>
 </section>
+
 </div>
+
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js"></script>
 <script src="app.js"></script>
 </body>

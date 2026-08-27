@@ -40,6 +40,7 @@ jobs:
         run: |
           test -f download_stock_prices_daily_update.py
           test -f generate_web_data.py
+          test -f validate_web_data.py
           test -f stock_master.xlsx
           test -f stock_prices.xlsx
           test -f docs/index.html
@@ -57,12 +58,20 @@ jobs:
 
       # --------------------------------------------------
       # Generate website data
-      # This creates docs/data.json
-      # for all sectors in stock_master.xlsx
+      # The generator writes data.json atomically and refuses
+      # obviously incomplete price data.
       # --------------------------------------------------
       - name: Generate website data
         run: |
           python generate_web_data.py
+
+      # --------------------------------------------------
+      # Validate the exact JSON that will be published
+      # If validation fails, nothing is committed.
+      # --------------------------------------------------
+      - name: Validate website data
+        run: |
+          python validate_web_data.py
 
       # --------------------------------------------------
       # Show generated changes
