@@ -38,17 +38,6 @@ REQUEST_TIMEOUT = 30
 # Small delay between requests
 REQUEST_DELAY = 0.15
 
-# ============================================================
-# LIVE LTP / MARKET HOURS CONFIG
-# ============================================================
-
-IST = ZoneInfo("Asia/Kolkata")
-MARKET_OPEN = dt_time(9, 15)
-MARKET_CLOSE = dt_time(15, 30)
-LTP_URL = "https://api.upstox.com/v3/market-quote/ltp"
-LTP_BATCH_SIZE = 500
-
-
 
 # ============================================================
 # LOAD TOKEN
@@ -337,161 +326,6 @@ def get_historical_closes(
 
         return None
 
-
-
-
-# ============================================================
-# MARKET MODE
-# ============================================================
-
-def get_ist_now():
-    return datetime.now(IST)
-
-
-def get_market_mode(now=None):
-    now = now or get_ist_now()
-    if now.weekday() >= 5:
-        return "DAILY_CLOSE"
-    if MARKET_OPEN <= now.time() <= MARKET_CLOSE:
-        return "LIVE_LTP"
-    return "DAILY_CLOSE"
-
-
-# ============================================================
-# GET LIVE LTP DATA
-# ============================================================
-
-def get_live_ltp(instrument_map, symbols):
-    ltp_prices = {}
-    items = [
-        (symbol, instrument_map[symbol]["instrument_key"])
-        for symbol in symbols
-        if symbol in instrument_map
-        and instrument_map[symbol].get("instrument_key")
-    ]
-
-    print()
-    print("=" * 70)
-    print("Downloading live Upstox LTP...")
-    print("=" * 70)
-    print(f"Instruments requested: {len(items)}")
-
-    failed_batches = 0
-
-    for start in range(0, len(items), LTP_BATCH_SIZE):
-        batch = items[start:start + LTP_BATCH_SIZE]
-        keys = ",".join(key for _, key in batch)
-
-        try:
-            response = requests.get(
-                LTP_URL,
-                params={"instrument_key": keys},
-                headers=HEADERS,
-                timeout=REQUEST_TIMEOUT,
-            )
-
-            if response.status_code != 200:
-                failed_batches += 1
-                print(
-                    f"LTP batch HTTP {response.status_code}: "
-                    f"{response.text[:200]}"
-                )
-                continue
-
-            payload = response.json()
-            if payload.get("status") != "success":
-                failed_batches += 1
-                print("LTP batch returned non-success status.")
-                continue
-
-            data = payload.get("data", {})
-
-            for response_key, quote in data.items():
-                symbol = str(response_key).split(":")[-1].strip().upper()
-                value = quote.get("last_price")
-
-                try:
-                    value = float(value)
-                except (TypeError, ValueError):
-                    continue
-
-                if value <= 0:
-                    continue
-
-                ltp_prices[symbol] = {
-                    "last_price": value,
-                    "previous_close": quote.get("cp"),
-                }
-
-        except requests.RequestException as e:
-            failed_batches += 1
-            print(f"LTP batch request error: {e}")
-        except Exception as e:
-            failed_batches += 1
-            print(f"LTP batch parsing error: {e}")
-
-    print(f"LTP quotes received: {len(ltp_prices):,}")
-    if failed_batches:
-        print(f"LTP batches failed: {failed_batches}")
-
-    return ltp_prices
-
-
-def apply_today_values(price_df, ltp_data, today, source):
-    if not ltp_data:
-        print(f"{source} returned no usable quotes.")
-        return price_df, 0
-
-    price_df = price_df.copy()
-    price_df["Date"] = pd.to_datetime(price_df["Date"], errors="coerce")
-    today_ts = pd.Timestamp(today)
-
-    if today_ts not in set(price_df["Date"].dropna()):
-        price_df = pd.concat(
-            [price_df, pd.DataFrame([{"Date": today_ts}])],
-            ignore_index=True,
-        )
-
-    updated = 0
-
-    for symbol, quote in ltp_data.items():
-        if symbol not in price_df.columns:
-            continue
-
-        value = quote.get("last_price")
-        try:
-            value = float(value)
-        except (TypeError, ValueError):
-            continue
-
-        if value <= 0:
-            continue
-
-        price_df.loc[price_df["Date"] == today_ts, symbol] = value
-        updated += 1
-
-    price_df = price_df.sort_values("Date")
-    price_df = price_df.drop_duplicates("Date", keep="last")
-
-    numeric_columns = [c for c in price_df.columns if c != "Date"]
-    if numeric_columns:
-        price_df[numeric_columns] = (
-            price_df[numeric_columns]
-            .apply(pd.to_numeric, errors="coerce")
-            .round(2)
-        )
-
-    print(f"{source} values applied: {updated:,}")
-    return price_df, updated
-
-
-def has_today_data(price_df, today):
-    if price_df is None or price_df.empty:
-        return False
-    dates = pd.to_datetime(
-        price_df["Date"], errors="coerce"
-    ).dt.date
-    return today in set(dates.dropna())
 
 
 # ============================================================
@@ -829,204 +663,767 @@ def save_price_file(
         )
 
 
+
+# ============================================================
+# LIVE LTP / MARKET HOURS
+# ============================================================
+
+IST = ZoneInfo("Asia/Kolkata")
+MARKET_OPEN = dt_time(9, 15)
+MARKET_CLOSE = dt_time(15, 30)
+
+LTP_URL = "https://api.upstox.com/v3/market-quote/ltp"
+LTP_BATCH_SIZE = 500
+
+
+def get_live_ltp(instrument_map):
+    """Fetch current LTP for NSE equities in batches."""
+    items = [
+        (symbol, data["instrument_key"])
+        for symbol, data in instrument_map.items()
+        if data.get("instrument_key")
+    ]
+
+    ltp_prices = {}
+    failed_batches = 0
+
+    print()
+    print("Downloading live Upstox LTP...")
+
+    for start in range(
+        0,
+        len(items),
+        LTP_BATCH_SIZE
+    ):
+        batch = items[
+            start:start + LTP_BATCH_SIZE
+        ]
+
+        params = {
+            "instrument_key": ",".join(
+                key
+                for _, key in batch
+            )
+        }
+
+        try:
+            response = requests.get(
+                LTP_URL,
+                headers=HEADERS,
+                params=params,
+                timeout=REQUEST_TIMEOUT
+            )
+
+            if response.status_code != 200:
+                print(
+                    f"LTP batch HTTP "
+                    f"{response.status_code}: "
+                    f"{response.text[:200]}"
+                )
+                failed_batches += 1
+                continue
+
+            payload = response.json()
+
+            if payload.get("status") != "success":
+                print("LTP batch returned non-success status.")
+                failed_batches += 1
+                continue
+
+            quote_data = (
+                payload
+                .get("data", {})
+            )
+
+            # Build reverse map from instrument key to symbol.
+            key_to_symbol = {
+                key: symbol
+                for symbol, key in batch
+            }
+
+            for response_key, quote in quote_data.items():
+
+                symbol = key_to_symbol.get(
+                    response_key
+                )
+
+                if symbol is None:
+                    # Some responses use exchange:symbol as key.
+                    symbol = response_key.split(":")[-1].upper()
+
+                last_price = quote.get(
+                    "last_price"
+                )
+
+                try:
+                    last_price = float(
+                        last_price
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    continue
+
+                if last_price <= 0:
+                    continue
+
+                previous_close = quote.get("cp")
+
+                try:
+                    previous_close = (
+                        float(previous_close)
+                        if previous_close is not None
+                        else None
+                    )
+                except (
+                    TypeError,
+                    ValueError
+                ):
+                    previous_close = None
+
+                ltp_prices[symbol] = {
+                    "last_price": last_price,
+                    "previous_close": previous_close,
+                }
+
+        except requests.RequestException as e:
+            print(
+                f"LTP batch request error: {e}"
+            )
+            failed_batches += 1
+
+        except Exception as e:
+            print(
+                f"LTP batch parsing error: {e}"
+            )
+            failed_batches += 1
+
+    print(
+        f"LTP quotes received: "
+        f"{len(ltp_prices):,}"
+    )
+
+    if failed_batches:
+        print(
+            f"LTP batches failed: "
+            f"{failed_batches}"
+        )
+
+    return ltp_prices
+
+
 # ============================================================
 # MAIN
 # ============================================================
 
-def main():
-    start_time = time.time()
+def get_ist_now():
+    """Return current India time."""
+    return pd.Timestamp.now(tz=IST)
 
-    now_ist = get_ist_now()
-    today = now_ist.date()
-    mode = get_market_mode(now_ist)
+
+def is_market_hours(now_ist=None):
+    """Return True only during NSE cash-market hours on weekdays."""
+    if now_ist is None:
+        now_ist = get_ist_now()
+
+    if now_ist.weekday() >= 5:
+        return False
+
+    current_time = now_ist.time().replace(tzinfo=None)
+    return MARKET_OPEN <= current_time <= MARKET_CLOSE
+
+
+def get_today_close_for_symbol(instrument_key, today):
+    """Fetch today's official daily close for one symbol."""
+    df = get_historical_closes(
+        instrument_key,
+        today.strftime("%Y-%m-%d"),
+        today.strftime("%Y-%m-%d"),
+    )
+
+    if df is None or df.empty:
+        return None
+
+    rows = df[df["Date"] == today]
+
+    if rows.empty:
+        return None
+
+    value = rows.iloc[-1]["Close"]
+
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if value <= 0:
+        return None
+
+    return value
+
+
+def apply_live_ltp(
+    price_df,
+    symbols,
+    instrument_map,
+    source_label="LTP",
+):
+    """Create/update today's row from batched LTP quotes."""
+    ltp_data = get_live_ltp(instrument_map)
+
+    if not ltp_data:
+        print("No usable LTP quotes received.")
+        return price_df, 0
+
+    price_df = price_df.copy()
+    price_df["Date"] = pd.to_datetime(price_df["Date"])
+    price_df = price_df.set_index("Date")
+
+    today_ts = pd.Timestamp(date.today())
+
+    if today_ts not in price_df.index:
+        price_df.loc[today_ts] = pd.NA
+
+    applied = 0
+
+    for symbol in symbols:
+        quote = ltp_data.get(symbol)
+        if not quote:
+            continue
+
+        value = quote.get("last_price")
+
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+
+        if value <= 0:
+            continue
+
+        if symbol not in price_df.columns:
+            price_df[symbol] = pd.NA
+
+        price_df.loc[today_ts, symbol] = value
+        applied += 1
+
+    price_df = price_df.sort_index()
+    price_df = price_df.reset_index()
+
+    print(
+        f"{source_label} values applied: {applied}"
+    )
+
+    return price_df, applied
+
+
+def apply_official_close(
+    price_df,
+    symbols,
+    instrument_map,
+):
+    """
+    Attempt official daily close for today's row.
+
+    Only replace today's values where the official close is available.
+    This prevents a missing daily candle from destroying today's LTP.
+    """
+    price_df = price_df.copy()
+    price_df["Date"] = pd.to_datetime(price_df["Date"])
+    price_df = price_df.set_index("Date")
+
+    today = date.today()
+    today_ts = pd.Timestamp(today)
+
+    if today_ts not in price_df.index:
+        price_df.loc[today_ts] = pd.NA
+
+    applied = 0
+
+    print()
+    print("=" * 70)
+    print("Checking official daily close for today...")
+    print("=" * 70)
+
+    for index, symbol in enumerate(symbols, start=1):
+        instrument = instrument_map.get(symbol)
+
+        if instrument is None:
+            continue
+
+        close = get_today_close_for_symbol(
+            instrument["instrument_key"],
+            today,
+        )
+
+        if close is None:
+            print(
+                f"[{index:>3}/{len(symbols)}] "
+                f"{symbol:<20} CLOSE NOT AVAILABLE"
+            )
+            continue
+
+        if symbol not in price_df.columns:
+            price_df[symbol] = pd.NA
+
+        price_df.loc[today_ts, symbol] = close
+        applied += 1
+
+        print(
+            f"[{index:>3}/{len(symbols)}] "
+            f"{symbol:<20} CLOSE {close:.2f}"
+        )
+
+        time.sleep(REQUEST_DELAY)
+
+    price_df = price_df.sort_index()
+    price_df = price_df.reset_index()
+
+    print(f"Official close values applied: {applied}")
+
+    return price_df, applied
+
+
+def main():
+
+    start_time = time.time()
 
     print()
     print("=" * 70)
     print("       STOCK PRICE MASTER DOWNLOADER")
     print("=" * 70)
     print()
+
+    now_ist = get_ist_now()
+    live_mode = is_market_hours(now_ist)
+
     print("Source  : Upstox")
     print("Market  : NSE")
     print("Interval: Daily")
-    print(f"Time    : {now_ist.strftime('%Y-%m-%d %H:%M:%S IST')}")
-    print(f"Mode    : {mode}")
+    print(
+        f"Time    : {now_ist.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+    )
+    print(
+        f"Mode    : {'LIVE LTP' if live_mode else 'DAILY CLOSE'}"
+    )
     print()
 
-    stock_master, symbols, symbol_column = load_stock_master()
-    instrument_map = load_upstox_instruments()
-    existing_prices = load_existing_prices()
+    # --------------------------------------------------------
+    # Load stock master
+    # --------------------------------------------------------
 
-    missing_symbols = []
-    failed_symbols = []
-    old_dates = set()
+    stock_master, symbols, symbol_column = (
+        load_stock_master()
+    )
+
+    # --------------------------------------------------------
+    # Load current Upstox instrument master
+    # --------------------------------------------------------
+
+    instrument_map = (
+        load_upstox_instruments()
+    )
+
+    # --------------------------------------------------------
+    # Existing price file?
+    # --------------------------------------------------------
+
+    existing_prices = (
+        load_existing_prices()
+    )
+
+    today = date.today()
+
+    # ========================================================
+    # FIRST RUN
+    # ========================================================
 
     if existing_prices is None:
+
         print()
         print("=" * 70)
         print("FIRST RUN - DOWNLOADING 1 YEAR HISTORY")
         print("=" * 70)
 
-        from_date = today - timedelta(days=LOOKBACK_DAYS)
-
-        new_prices, missing_symbols, failed_symbols = download_prices(
-            symbols, instrument_map, from_date, today
+        from_date = (
+            today -
+            timedelta(days=LOOKBACK_DAYS)
         )
 
-        price_df = merge_prices(None, new_prices, symbols)
+        (
+            new_prices,
+            missing_symbols,
+            failed_symbols
+        ) = download_prices(
+            symbols,
+            instrument_map,
+            from_date,
+            today
+        )
+
+        price_df = merge_prices(
+            None,
+            new_prices,
+            symbols
+        )
+
         old_dates = set()
 
+        # On first run, keep historical downloader behavior.
+        # During/after hours, refresh today's row with LTP if available.
+        if not price_df.empty:
+            price_df, _ = apply_live_ltp(
+                price_df,
+                symbols,
+                instrument_map,
+                source_label="INITIAL LTP",
+            )
+
+    # ========================================================
+    # DAILY INCREMENTAL UPDATE
+    # ========================================================
+
     else:
-        last_date = existing_prices["Date"].max().date()
+
+        last_date = (
+            existing_prices["Date"]
+            .max()
+            .date()
+        )
 
         print()
         print("=" * 70)
         print("EXISTING PRICE FILE FOUND")
         print("=" * 70)
-        print(f"Latest stored date: {last_date}")
-        print(f"Today:              {today}")
 
-        old_dates = set(existing_prices["Date"].dt.date)
+        print(
+            f"Latest stored date: {last_date}"
+        )
 
-        if mode == "LIVE_LTP":
+        print(
+            f"Today:              {today}"
+        )
+
+        old_dates = set(
+            existing_prices["Date"]
+            .dt.date
+        )
+
+        price_df = existing_prices.copy()
+
+        # ----------------------------------------------------
+        # MARKET HOURS: always refresh today's LTP.
+        # Historical backfill is handled separately below.
+        # ----------------------------------------------------
+
+        if live_mode:
+
             print()
-            print("Market is open — using current Upstox LTP.")
-            print("Today's LTP will refresh on every run.")
-
-            price_df = existing_prices.copy()
-            for symbol in symbols:
-                if symbol not in price_df.columns:
-                    price_df[symbol] = pd.NA
-
-            ltp_data = get_live_ltp(instrument_map, symbols)
-            price_df, _ = apply_today_values(
-                price_df, ltp_data, today, "LIVE LTP"
+            print(
+                "Market is open — using current Upstox LTP "
+                "for today's row."
             )
 
+            price_df, applied = apply_live_ltp(
+                price_df,
+                symbols,
+                instrument_map,
+                source_label="LTP",
+            )
+
+            if applied == 0:
+                print(
+                    "WARNING: No LTP values were applied."
+                )
+
+        # ----------------------------------------------------
+        # AFTER HOURS:
+        #
+        # 1. If there are missing historical days, fetch them.
+        # 2. Ensure today's row exists.
+        # 3. Try official close.
+        # 4. If close unavailable, fill missing today's
+        #    values with LTP as a temporary fallback.
+        # ----------------------------------------------------
+
         else:
-            from_date = last_date + timedelta(days=1)
+
+            from_date = (
+                last_date +
+                timedelta(days=1)
+            )
 
             if from_date <= today:
+
                 print()
                 print(
-                    f"Updating completed daily data from "
+                    f"Updating completed data from "
                     f"{from_date} → {today}"
                 )
 
-                new_prices, missing_symbols, failed_symbols = (
-                    download_prices(
-                        symbols,
-                        instrument_map,
-                        from_date,
-                        today,
-                    )
-                )
-
-                price_df = merge_prices(
-                    existing_prices,
+                (
                     new_prices,
+                    missing_symbols,
+                    failed_symbols
+                ) = download_prices(
                     symbols,
+                    instrument_map,
+                    from_date,
+                    today
                 )
+
+                if new_prices:
+                    price_df = merge_prices(
+                        price_df,
+                        new_prices,
+                        symbols
+                    )
+
             else:
-                price_df = existing_prices.copy()
 
-            if today.weekday() < 5 and not has_today_data(
-                price_df, today
-            ):
+                missing_symbols = []
+                failed_symbols = []
+
+            # Official close attempt.
+            price_df, close_applied = apply_official_close(
+                price_df,
+                symbols,
+                instrument_map,
+            )
+
+            # Fallback only for symbols whose today's value
+            # is still missing. Never overwrite a valid close.
+            today_ts = pd.Timestamp(today)
+
+            if today_ts not in pd.to_datetime(
+                price_df["Date"]
+            ).values:
+
+                price_df["Date"] = pd.to_datetime(
+                    price_df["Date"]
+                )
+                price_df = price_df.set_index("Date")
+                price_df.loc[today_ts] = pd.NA
+                price_df = price_df.reset_index()
+
+            today_row = (
+                price_df["Date"] == today_ts
+            )
+
+            missing_today = [
+                symbol
+                for symbol in symbols
+                if symbol in price_df.columns
+                and pd.isna(
+                    pd.to_numeric(
+                        price_df.loc[today_row, symbol],
+                        errors="coerce"
+                    ).iloc[0]
+                )
+            ]
+
+            if missing_today:
                 print()
-                print("=" * 70)
-                print("TODAY'S DAILY CLOSE NOT AVAILABLE YET")
-                print("=" * 70)
                 print(
-                    "Using after-hours LTP as a temporary value "
-                    "for today's row."
+                    f"Official close missing for "
+                    f"{len(missing_today)} stocks."
                 )
                 print(
-                    "The next run will replace it with the "
-                    "official close when available."
+                    "Using LTP as temporary fallback "
+                    "for missing today's values."
                 )
 
-                ltp_data = get_live_ltp(instrument_map, symbols)
-                price_df, _ = apply_today_values(
-                    price_df,
-                    ltp_data,
-                    today,
-                    "LTP-FALLBACK",
+                ltp_data = get_live_ltp(
+                    instrument_map
                 )
 
-    if price_df is None or price_df.empty:
+                fallback_applied = 0
+
+                for symbol in missing_today:
+
+                    quote = ltp_data.get(symbol)
+
+                    if not quote:
+                        continue
+
+                    value = quote.get("last_price")
+
+                    try:
+                        value = float(value)
+                    except (TypeError, ValueError):
+                        continue
+
+                    if value <= 0:
+                        continue
+
+                    price_df.loc[
+                        today_row,
+                        symbol
+                    ] = value
+
+                    fallback_applied += 1
+
+                print(
+                    f"LTP fallback values applied: "
+                    f"{fallback_applied}"
+                )
+
+            else:
+                print(
+                    "Official close available for all "
+                    "stocks with data."
+                )
+
+        price_df = price_df.sort_values("Date")
+        price_df = price_df.drop_duplicates(
+            subset=["Date"],
+            keep="last"
+        )
+
+    # --------------------------------------------------------
+    # Validate
+    # --------------------------------------------------------
+
+    if price_df.empty:
+
         print()
-        print("ERROR: No price data available.")
+        print(
+            "ERROR: No price data available."
+        )
+
         sys.exit(1)
+
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
 
     save_price_file(
         price_df,
         symbols,
         instrument_map,
         missing_symbols,
-        failed_symbols,
+        failed_symbols
     )
 
-    elapsed = time.time() - start_time
-    latest_date = price_df["Date"].max().strftime("%d-%b-%Y")
+    # --------------------------------------------------------
+    # Summary
+    # --------------------------------------------------------
+
+    elapsed = (
+        time.time() -
+        start_time
+    )
+
+    latest_date = (
+        price_df["Date"]
+        .max()
+        .strftime("%d-%b-%Y")
+    )
 
     stocks_with_data = sum(
-        1 for symbol in symbols
+        1
+        for symbol in symbols
         if symbol in price_df.columns
         and price_df[symbol].notna().any()
     )
 
     new_dates = sorted(
-        set(pd.to_datetime(price_df["Date"]).dt.date) - old_dates
+        set(
+            pd.to_datetime(
+                price_df["Date"]
+            ).dt.date
+        ) - old_dates
     )
 
     print()
     print("=" * 70)
     print("DOWNLOAD / UPDATE COMPLETE")
     print("=" * 70)
-    print(f"Stocks requested : {len(symbols)}")
-    print(f"Stocks with data : {stocks_with_data}")
-    print(f"Not found        : {len(missing_symbols)}")
-    print(f"Failed           : {len(failed_symbols)}")
-    print(f"Trading days     : {len(price_df)}")
-    print(f"Latest date      : {latest_date}")
-    print(f"Excel file       : {OUTPUT_FILE}")
-    print(f"Time taken       : {elapsed:.1f} seconds")
 
-    if mode == "LIVE_LTP":
-        print("Today's source   : LIVE LTP")
-    elif today.weekday() < 5 and has_today_data(price_df, today):
-        print("Today's source   : DAILY CLOSE")
-    elif today.weekday() < 5:
-        print("Today's source   : LTP-FALLBACK")
+    print(
+        f"Stocks requested : {len(symbols)}"
+    )
+
+    print(
+        f"Stocks with data  : {stocks_with_data}"
+    )
+
+    print(
+        f"Not found         : "
+        f"{len(missing_symbols)}"
+    )
+
+    print(
+        f"Failed            : "
+        f"{len(failed_symbols)}"
+    )
+
+    print(
+        f"Trading days      : "
+        f"{len(price_df)}"
+    )
+
+    print(
+        f"Latest date       : "
+        f"{latest_date}"
+    )
+
+    print(
+        f"Excel file        : "
+        f"{OUTPUT_FILE}"
+    )
+
+    print(
+        f"Time taken        : "
+        f"{elapsed:.1f} seconds"
+    )
 
     if new_dates:
+
         print()
         print("NEW DATES ADDED:")
+
         for dt in new_dates:
-            print(f"  - {dt.strftime('%d-%b-%Y')}")
+
+            print(
+                f"  - {dt.strftime('%d-%b-%Y')}"
+            )
+
     else:
+
         print()
         print("NO NEW TRADING DAY ADDED.")
 
     if missing_symbols:
+
         print()
         print("NOT FOUND SYMBOLS:")
+
         for symbol in missing_symbols:
-            print(f"  - {symbol}")
+
+            print(
+                f"  - {symbol}"
+            )
 
     if failed_symbols:
+
         print()
         print("FAILED SYMBOLS:")
+
         for symbol in failed_symbols:
-            print(f"  - {symbol}")
+
+            print(
+                f"  - {symbol}"
+            )
 
     print()
     print("Done.")
+
 
 # ============================================================
 # RUN
 # ============================================================
 
 if __name__ == "__main__":
-
     main()
