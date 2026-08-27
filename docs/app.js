@@ -205,7 +205,13 @@ function drawLegend(symbols) {
   legend.innerHTML = "";
 
   symbols.forEach((symbol, index) => {
-    addLegendItem(symbol, lineColors[index % lineColors.length], false);
+    // Stock symbols open their Chartink page in a new tab.
+    addLegendItem(
+      symbol,
+      lineColors[index % lineColors.length],
+      false,
+      `https://chartink.com/stocks/${encodeURIComponent(symbol)}.html`
+    );
   });
 
   addLegendItem("Nifty 50", benchmarkColors.nifty50, true);
@@ -213,7 +219,7 @@ function drawLegend(symbols) {
   addLegendItem("Nifty 500", benchmarkColors.nifty500, true);
 }
 
-function addLegendItem(label, color, dashed) {
+function addLegendItem(label, color, dashed, href = null) {
   const item = document.createElement("div");
   item.className = "legend-item";
 
@@ -227,11 +233,28 @@ function addLegendItem(label, color, dashed) {
     line.style.backgroundColor = "transparent";
   }
 
-  const text = document.createElement("span");
-  text.textContent = label;
+  if (href) {
+    const link = document.createElement("a");
+    link.href = href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = label;
+    link.title = `Open ${label} on Chartink`;
+    link.style.cursor = "pointer";
+    link.style.textDecoration = "none";
+    link.style.color = "inherit";
+    link.addEventListener("click", event => event.stopPropagation());
 
-  item.appendChild(line);
-  item.appendChild(text);
+    item.appendChild(line);
+    item.appendChild(link);
+  } else {
+    const text = document.createElement("span");
+    text.textContent = label;
+
+    item.appendChild(line);
+    item.appendChild(text);
+  }
+
   legend.appendChild(item);
 }
 
