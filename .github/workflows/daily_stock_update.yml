@@ -11,45 +11,75 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # --------------------------------------------------
+      # Checkout repository
+      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # --------------------------------------------------
+      # Setup Python
+      # --------------------------------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      # --------------------------------------------------
+      # Install required Python packages
+      # --------------------------------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas openpyxl requests python-dotenv plotly
+          pip install pandas openpyxl requests python-dotenv
 
+      # --------------------------------------------------
+      # Check required files
+      # --------------------------------------------------
       - name: Check required files
         run: |
           test -f download_stock_prices_daily_update.py
+          test -f generate_web_data.py
           test -f stock_master.xlsx
           test -f stock_prices.xlsx
+          test -f docs/index.html
+          test -f docs/app.js
+          test -f docs/style.css
 
+      # --------------------------------------------------
+      # Update stock prices from Upstox
+      # --------------------------------------------------
       - name: Run daily Upstox update
         env:
           UPSTOX_ACCESS_TOKEN: ${{ secrets.UPSTOX_ACCESS_TOKEN }}
         run: |
           python download_stock_prices_daily_update.py
 
-      - name: Generate automated comparison charts
+      # --------------------------------------------------
+      # Generate website data
+      # This creates docs/data.json
+      # for all sectors in stock_master.xlsx
+      # --------------------------------------------------
+      - name: Generate website data
         run: |
-          python generate_comparison_charts_auto.py
+          python generate_web_data.py
 
+      # --------------------------------------------------
+      # Show generated changes
+      # --------------------------------------------------
       - name: Show changes
         run: |
           git status --short
 
+      # --------------------------------------------------
+      # Commit and push
+      # --------------------------------------------------
       - name: Commit and push changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add stock_prices.xlsx sector_charts
+          git add stock_prices.xlsx docs/data.json
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
