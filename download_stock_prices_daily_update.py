@@ -1113,8 +1113,11 @@ def main():
         price_df = existing_prices.copy()
 
         # ----------------------------------------------------
-        # MARKET HOURS: always refresh today's LTP.
-        # Historical backfill is handled separately below.
+        # MARKET HOURS: today's row is LIVE LTP only.
+        #
+        # Do NOT process the official daily close while the
+        # NSE cash market is open. The current daily candle is
+        # incomplete and may be stale/delayed.
         # ----------------------------------------------------
 
         if live_mode:
@@ -1122,7 +1125,7 @@ def main():
             print()
             print(
                 "Market is open — using current Upstox LTP "
-                "for today's row."
+                "for today's row only."
             )
 
             price_df, applied = apply_live_ltp(
@@ -1133,18 +1136,14 @@ def main():
             )
 
             if applied == 0:
-                print(
-                    "WARNING: No LTP values were applied."
-                )
+                print("WARNING: No LTP values were applied.")
 
         # ----------------------------------------------------
         # AFTER HOURS:
         #
-        # 1. If there are missing historical days, fetch them.
-        # 2. Ensure today's row exists.
-        # 3. Try official close.
-        # 4. If close unavailable, fill missing today's
-        #    values with LTP as a temporary fallback.
+        # Fetch completed daily data and official close.
+        # If a stock's official close is unavailable, use LTP
+        # only as a temporary fallback for that stock.
         # ----------------------------------------------------
 
         else:
