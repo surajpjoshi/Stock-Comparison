@@ -1,4 +1,7 @@
 let appData = null;
+let rsiData = [];
+let rsiBySymbol = new Map();
+let stockMetadata = {};
 let chart = null;
 
 const sectorSelect = document.getElementById("sectorSelect");
@@ -24,10 +27,43 @@ const benchmarkColors = {
 };
 
 async function loadData() {
-  const response = await fetch("data.json", { cache: "no-store" });
+  const [response, rsiResponse, metadataResponse] = await Promise.all([
+    fetch("data.json", { cache: "no-store" }),
+    fetch("rsi_data.json", { cache: "no-store" }),
+    fetch("stock_metadata.json", { cache: "no-store" })
+  ]);
 
   if (!response.ok) {
     throw new Error(`Unable to load data.json (${response.status})`);
+  }
+
+  if (rsiResponse.ok) {
+    try {
+      const rawRsi = await rsiResponse.text();
+      rsiData = JSON.parse(rawRsi);
+      if (!Array.isArray(rsiData)) rsiData = [];
+      rsiBySymbol = new Map(
+        rsiData
+          .filter(item => item && item.Symbol)
+          .map(item => [normalizeSymbol(item.Symbol), item])
+      );
+    } catch (error) {
+      console.warn("Unable to load rsi_data.json:", error);
+      rsiData = [];
+      rsiBySymbol = new Map();
+    }
+  }
+
+  if (metadataResponse.ok) {
+    try {
+      stockMetadata = await metadataResponse.json();
+      if (!stockMetadata || typeof stockMetadata !== "object") {
+        stockMetadata = {};
+      }
+    } catch (error) {
+      console.warn("Unable to load stock_metadata.json:", error);
+      stockMetadata = {};
+    }
   }
 
   const raw = await response.text();
@@ -71,7 +107,7 @@ function populateSectors() {
   }
 }
 
-function render() {
+function render(focusSymbol = null) {
   const sector = sectorSelect.value;
   const period = periodSelect.value;
   const count = Number(stocksSelect.value);
@@ -87,9 +123,24 @@ function render() {
   }
 
   const ranking = count === 5 ? periodData.top5 : periodData.top10;
-  const symbols = (ranking || []).filter(symbol =>
+  let symbols = (ranking || []).filter(symbol =>
     periodData.series && Array.isArray(periodData.series[symbol])
   );
+
+  // When an RSI alert is clicked, keep that stock in the chart and
+  // fill the remaining slots with the sector's normal top peers.
+  if (focusSymbol) {
+    const focused = normalizeSymbol(focusSymbol);
+    const matchingSymbol = Object.keys(periodData.series || {})
+      .find(symbol => normalizeSymbol(symbol) === focused);
+
+    if (matchingSymbol) {
+      symbols = [
+        matchingSymbol,
+        ...symbols.filter(symbol => normalizeSymbol(symbol) !== focused)
+      ].slice(0, count);
+    }
+  }
 
   if (!symbols.length) {
     destroyChart();
@@ -111,7 +162,32 @@ function render() {
   drawTable(symbols, periodData);
   drawBenchmarkCards(sector, period);
   drawSectorRanking(period);
+  drawRsiAlerts();
 }
+
+const rsiAlertLabelPlugin = {
+  id: "rsiAlertLabel",
+  afterDatasetsDraw(chartInstance) {
+    const ctx = chartInstance.ctx;
+    ctx.save();
+    ctx.font = "600 12px Arial";
+    ctx.fillStyle = "#dc2626";
+    ctx.textBaseline = "middle";
+
+    chartInstance.data.datasets.forEach((dataset, datasetIndex) => {
+      if (!dataset.rsiAlert) return;
+      const meta = chartInstance.getDatasetMeta(datasetIndex);
+      const point = meta.data.find(Boolean);
+      if (!point) return;
+
+      const position = point.getProps(["x", "y"], true);
+      const label = `RSI < 35 (${Number(dataset.rsiValue).toFixed(1)})`;
+      ctx.fillText(label, position.x + 12, position.y);
+    });
+
+    ctx.restore();
+  }
+};
 
 function drawChart(labels, symbols, periodData, period) {
   destroyChart();
@@ -134,6 +210,45 @@ function drawChart(labels, symbols, periodData, period) {
       fill: false,
       spanGaps: true
     };
+  });
+
+  // Add a star marker at the latest available chart point when the
+  // latest hourly RSI from rsi-dashboard is below 35.
+  symbols.forEach((symbol, index) => {
+    const rsiItem = rsiBySymbol.get(normalizeSymbol(symbol));
+    const rsi = Number(rsiItem?.["Current Hourly RSI"]);
+    if (!Number.isFinite(rsi) || rsi >= 35) return;
+
+    const values = periodData.series[symbol].map(v => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    });
+    let lastIndex = -1;
+    for (let i = values.length - 1; i >= 0; i--) {
+      if (values[i] !== null) {
+        lastIndex = i;
+        break;
+      }
+    }
+    if (lastIndex < 0) return;
+
+    const alertPoints = values.map((value, i) => i === lastIndex ? value : null);
+    datasets.push({
+      label: `${symbol} ⭐ RSI < 35`,
+      data: alertPoints,
+      borderWidth: 0,
+      backgroundColor: "#dc2626",
+      pointBackgroundColor: "#dc2626",
+      pointBorderColor: "#ffffff",
+      pointBorderWidth: 2,
+      pointRadius: 9,
+      pointHoverRadius: 11,
+      pointStyle: "star",
+      showLine: false,
+      spanGaps: false,
+      rsiAlert: true,
+      rsiValue: rsi
+    });
   });
 
   const benchmarkDefinitions = [
@@ -168,6 +283,7 @@ function drawChart(labels, symbols, periodData, period) {
     {
       type: "line",
       data: { labels, datasets },
+      plugins: [rsiAlertLabelPlugin],
       options: {
         responsive: true,
         maintainAspectRatio: false,
@@ -177,6 +293,9 @@ function drawChart(labels, symbols, periodData, period) {
           tooltip: {
             callbacks: {
               label: context => {
+                if (context.dataset.rsiAlert) {
+                  return `${context.dataset.label}: ${Number(context.dataset.rsiValue).toFixed(2)}`;
+                }
                 const value = context.parsed.y;
                 return value == null
                   ? `${context.dataset.label}: N/A`
@@ -345,6 +464,167 @@ function drawSectorRanking(period) {
   });
 }
 
+function normalizeSectorText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/^nifty/, "")
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function scoreSectorForIndustry(sector, industry) {
+  const s = normalizeSectorText(sector);
+  const i = normalizeSectorText(industry);
+
+  if (!s || !i) return 0;
+
+  // Direct/near-direct industry → sector matches.
+  const aliases = [
+    ["oilgas", "oilandgas"],
+    ["oilgasconsumablefuels", "oilandgas"],
+    ["telecommunication", "telecommunications"],
+    ["telecommunication", "midsmallitandtelecom"],
+    ["informationtechnology", "it"],
+    ["capitalgoods", "capitalgoods"],
+    ["consumerdurables", "consumerdurables"],
+    ["consumerservices", "consumerservices"],
+    ["financialservices", "financialservices"],
+    ["financialservices", "financialservicesexbank"],
+    ["automobileandautocomponents", "auto"],
+    ["fastmovingconsumergoods", "fmcg"],
+    ["healthcare", "healthcare"],
+    ["metals", "metal"],
+    ["metalsmining", "metal"],
+    ["oilgas", "energy"],
+    ["power", "power"],
+    ["realty", "realty"],
+    ["mediaentertainmentpublication", "media"],
+    ["chemicals", "chemicals"],
+    ["constructionmaterials", "cement"],
+    ["construction", "construction"],
+  ];
+
+  let score = 0;
+  for (const [industryKey, sectorKey] of aliases) {
+    if (i.includes(industryKey) && s.includes(sectorKey)) {
+      score += 100;
+    }
+  }
+
+  // Token overlap is a secondary signal.
+  const industryTokens = i.match(/[a-z]{3,}/g) || [];
+  for (const token of industryTokens) {
+    if (s.includes(token)) score += 10;
+  }
+
+  // Avoid broad index buckets when a sector-specific candidate exists.
+  if (s === "500" || s === "100" || s === "200" || s.includes("next50") ||
+      s.includes("midcap") || s.includes("smallcap") || s.includes("microcap")) {
+    score -= 50;
+  }
+
+  return score;
+}
+
+function findSectorForSymbol(symbol, period) {
+  const target = normalizeSymbol(symbol);
+  const metadata = stockMetadata[target] || {};
+  const industry = metadata.industry || "";
+  const metadataSectors = Array.isArray(metadata.sectors) ? metadata.sectors : [];
+
+  const candidates = [];
+
+  for (const sector of Object.keys(appData.sectors || {})) {
+    const periodData = appData.sectors?.[sector]?.[period];
+    if (!periodData) continue;
+
+    const symbols = Object.keys(periodData.series || {});
+    if (symbols.some(item => normalizeSymbol(item) === target)) {
+      candidates.push(sector);
+    }
+  }
+
+  if (!candidates.length) return null;
+
+  // First prefer sectors explicitly listed in stock_master.xlsx.
+  const masterCandidates = candidates.filter(sector =>
+    metadataSectors.includes(sector)
+  );
+
+  const pool = masterCandidates.length ? masterCandidates : candidates;
+
+  // Industry is used to choose the actual sector rather than Nifty 500.
+  const ranked = pool
+    .map(sector => ({
+      sector,
+      score: scoreSectorForIndustry(sector, industry)
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  return ranked[0]?.sector || pool[0];
+}
+
+function drawRsiAlerts() {
+  const container = document.getElementById("rsiAlerts");
+  const count = document.getElementById("rsiAlertCount");
+  if (!container) return;
+
+  const period = periodSelect.value;
+  const alerts = rsiData
+    .map(item => {
+      const symbol = normalizeSymbol(item?.Symbol);
+      const rsi = Number(item?.["Current Hourly RSI"]);
+      return {
+        symbol,
+        rsi,
+        sector: symbol ? findSectorForSymbol(symbol, period) : null
+      };
+    })
+    .filter(item => item.symbol && Number.isFinite(item.rsi) && item.rsi < 35 && item.sector)
+    .sort((a, b) => a.rsi - b.rsi);
+
+  if (count) {
+    count.textContent = `${alerts.length} stock${alerts.length === 1 ? "" : "s"}`;
+  }
+
+  container.innerHTML = "";
+
+  if (!alerts.length) {
+    container.innerHTML = '<div class="rsi-alert-empty">No stocks currently have 1H RSI below 35.</div>';
+    return;
+  }
+
+  alerts.forEach(item => {
+    const row = document.createElement("tr");
+    const chartUrl = `https://chartink.com/stocks/${encodeURIComponent(item.symbol)}.html`;
+
+    row.innerHTML = `
+      <td>
+        <a href="#" class="rsi-symbol-link" data-symbol="${escapeHtml(item.symbol)}"
+           title="Open ${escapeHtml(getSectorName(item.sector))} chart">
+          ${escapeHtml(item.symbol)}
+        </a>
+      </td>
+      <td class="return-negative">${item.rsi.toFixed(1)}</td>
+      <td class="return-negative">🔴 RSI &lt; 35</td>
+      <td><a href="${chartUrl}" target="_blank" rel="noopener noreferrer">Open ChartInk ↗</a></td>
+    `;
+
+    const symbolLink = row.querySelector(".rsi-symbol-link");
+    symbolLink.addEventListener("click", event => {
+      event.preventDefault();
+      sectorSelect.value = item.sector;
+      render(item.symbol);
+      document.querySelector(".chart-card")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start"
+      });
+    });
+
+    container.appendChild(row);
+  });
+}
+
 function drawTable(symbols, periodData) {
   performanceTable.innerHTML = "";
 
@@ -383,6 +663,14 @@ function destroyChart() {
     chart.destroy();
     chart = null;
   }
+}
+
+function normalizeSymbol(value) {
+  return String(value || "")
+    .replace(/^NSE:/i, "")
+    .replace(/^BSE:/i, "")
+    .trim()
+    .toUpperCase();
 }
 
 function getSectorName(value) {

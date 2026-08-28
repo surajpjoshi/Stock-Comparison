@@ -5,6 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Stock Sector Comparison</title>
 <link rel="stylesheet" href="style.css">
+
+<style>
+.rsi-alert-card{margin-top:18px}
+.rsi-symbol-link{font-weight:700;text-decoration:none;color:#2563eb;cursor:pointer}
+.rsi-symbol-link:hover{text-decoration:underline}
+.rsi-alert-card td:last-child a{color:#2563eb;text-decoration:none;font-weight:600}
+.rsi-alert-card td:last-child a:hover{text-decoration:underline}
+.rsi-alert-empty{padding:12px 9px;color:#697386;font-size:12px}
+</style>
 </head>
 <body>
 <div class="container">
@@ -68,6 +77,36 @@
   </div>
   <div id="sectorStrengthBody" class="section-body">
     <div id="sectorRanking" class="sector-ranking"></div>
+  </div>
+</section>
+
+
+<section class="table-card rsi-alert-card">
+  <div class="section-heading">
+    <div>
+      <h2>🔔 RSI Alerts</h2>
+      <p>All stocks with current 1H RSI below 35</p>
+    </div>
+    <div class="section-actions">
+      <span id="rsiAlertCount" class="method-note">0 stocks</span>
+      <button type="button" class="section-toggle" data-target="rsiAlertsBody">Hide</button>
+    </div>
+  </div>
+
+  <div id="rsiAlertsBody" class="section-body">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>1H RSI</th>
+            <th>Signal</th>
+            <th>Chart</th>
+          </tr>
+        </thead>
+        <tbody id="rsiAlerts"></tbody>
+      </table>
+    </div>
   </div>
 </section>
 
