@@ -28,9 +28,9 @@ const benchmarkColors = {
 
 async function loadData() {
   const [response, rsiResponse, metadataResponse] = await Promise.all([
-    fetch("data.json", { cache: "no-store" }),
-    fetch("rsi_data.json", { cache: "no-store" }),
-    fetch("stock_metadata.json", { cache: "no-store" })
+    fetch(`data.json?_=${Date.now()}`, { cache: "no-store" }),
+    fetch(`rsi_data.json?_=${Date.now()}`, { cache: "no-store" }),
+    fetch(`stock_metadata.json?_=${Date.now()}`, { cache: "no-store" })
   ]);
 
   if (!response.ok) {
@@ -83,8 +83,21 @@ async function loadData() {
     throw new Error("data.json does not contain sector data.");
   }
 
+  const updatedAt = new Date();
+
+  const updatedTime = updatedAt.toLocaleTimeString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
+
   latestDate.textContent =
-    "Latest data: " + formatDate(appData.latest_date || "");
+    "Latest: " +
+    formatDate(appData.latest_date || "") +
+    " • " +
+    updatedTime +
+    " IST";
 
   populateSectors();
   render();
@@ -732,3 +745,8 @@ loadData().catch(error => {
   chartTitle.textContent = "Unable to load dashboard";
   chartSubtitle.textContent = error.message;
 });
+
+// Automatically reload the dashboard every 5 minutes.
+setInterval(() => {
+  window.location.reload();
+}, 5 * 60 * 1000);
