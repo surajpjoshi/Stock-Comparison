@@ -1,11 +1,7 @@
 name: Daily Stock Comparison Update
 
 on:
-  schedule:
-    # 4:00 PM IST = 10:30 AM UTC
-    # Monday to Friday
-    - cron: "30 4,6,8,9,12 * * 1-5"
-
+  
   # Allows manual execution from GitHub Actions
   workflow_dispatch:
 
