@@ -1034,6 +1034,10 @@ def main():
     )
 
     today = date.today()
+    # Initialize for both LIVE LTP and DAILY CLOSE modes.
+    missing_symbols = []
+    failed_symbols = []
+
 
     # ========================================================
     # FIRST RUN
