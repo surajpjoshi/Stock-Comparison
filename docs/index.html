@@ -7,13 +7,21 @@
 <link rel="stylesheet" href="style.css">
 
 <style>
-.rsi-alert-card{margin-top:18px}
-.rsi-symbol-link{font-weight:700;text-decoration:none;color:#2563eb;cursor:pointer}
-.rsi-symbol-link:hover{text-decoration:underline}
-.rsi-alert-card td:last-child a{color:#2563eb;text-decoration:none;font-weight:600}
-.rsi-alert-card td:last-child a:hover{text-decoration:underline}
-.rsi-alert-empty{padding:12px 9px;color:#697386;font-size:12px}
 .latest-date{white-space:nowrap}
+.period-nav{display:flex;align-items:center;gap:6px}
+.period-nav select{flex:1;min-width:0}
+.period-arrow{width:34px;height:34px;padding:0;border:1px solid #cbd5e1;border-radius:7px;background:#fff;color:#0f172a;font-size:22px;line-height:1;cursor:pointer}
+.period-arrow:hover{background:#f8fafc;border-color:#94a3b8}
+.period-arrow:active{background:#eef2f7}
+.period-arrow:disabled{opacity:.4;cursor:not-allowed}
+.period-range-label{margin-top:5px;font-size:10px;color:#697386;min-height:14px}
+.custom-date-controls{display:flex;gap:8px;margin-top:8px;align-items:end}
+.custom-date-controls[hidden]{display:none}
+.custom-date-controls>div{display:flex;flex-direction:column;gap:3px}
+.custom-date-controls label{font-size:10px;color:#697386}
+.custom-date-controls input{height:34px;padding:5px 8px;border:1px solid #cbd5e1;border-radius:7px;font:inherit;background:#fff}
+@media(max-width:700px){.custom-date-controls{flex-wrap:wrap}}
+
 </style>
 </head>
 <body>
@@ -35,12 +43,29 @@
 
   <div class="control">
     <label for="periodSelect">Period</label>
-    <select id="periodSelect">
+    <div class="period-nav">
+      <button type="button" id="periodPrev" class="period-arrow" aria-label="Move period one day earlier" title="One day earlier">&#8249;</button>
+      <select id="periodSelect">
+      <option value="1W">1W</option>
       <option value="1M">1M</option>
       <option value="3M">3M</option>
       <option value="6M">6M</option>
-      <option value="YTD">YTD</option>
-    </select>
+      <option value="YTD" selected>YTD</option>
+      <option value="CUSTOM">Custom</option>
+      </select>
+      <button type="button" id="periodNext" class="period-arrow" aria-label="Move period one day later" title="One day later">&#8250;</button>
+    </div>
+    <div id="periodRangeLabel" class="period-range-label"></div>
+    <div id="customDateControls" class="custom-date-controls" hidden>
+      <div>
+        <label for="startDate">Start</label>
+        <input type="date" id="startDate">
+      </div>
+      <div>
+        <label for="endDate">End</label>
+        <input type="date" id="endDate">
+      </div>
+    </div>
   </div>
 
   <div class="control">
@@ -81,35 +106,6 @@
   </div>
 </section>
 
-
-<section class="table-card rsi-alert-card">
-  <div class="section-heading">
-    <div>
-      <h2>🔔 RSI Alerts</h2>
-      <p>All stocks with current 1H RSI below 35</p>
-    </div>
-    <div class="section-actions">
-      <span id="rsiAlertCount" class="method-note">0 stocks</span>
-      <button type="button" class="section-toggle" data-target="rsiAlertsBody">Hide</button>
-    </div>
-  </div>
-
-  <div id="rsiAlertsBody" class="section-body">
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Symbol</th>
-            <th>1H RSI</th>
-            <th>Signal</th>
-            <th>Chart</th>
-          </tr>
-        </thead>
-        <tbody id="rsiAlerts"></tbody>
-      </table>
-    </div>
-  </div>
-</section>
 
 <section class="chart-card">
   <div class="chart-header">

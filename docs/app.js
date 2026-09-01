@@ -1,11 +1,13 @@
 let appData = null;
-let rsiData = [];
-let rsiBySymbol = new Map();
 let stockMetadata = {};
 let chart = null;
+let periodEndDateOverride = null;
 
 const sectorSelect = document.getElementById("sectorSelect");
 const periodSelect = document.getElementById("periodSelect");
+const periodPrev = document.getElementById("periodPrev");
+const periodNext = document.getElementById("periodNext");
+const periodRangeLabel = document.getElementById("periodRangeLabel");
 const stocksSelect = document.getElementById("stocksSelect");
 const latestDate = document.getElementById("latestDate");
 const chartTitle = document.getElementById("chartTitle");
@@ -27,31 +29,13 @@ const benchmarkColors = {
 };
 
 async function loadData() {
-  const [response, rsiResponse, metadataResponse] = await Promise.all([
-    fetch(`data.json?_=${Date.now()}`, { cache: "no-store" }),
-    fetch(`rsi_data.json?_=${Date.now()}`, { cache: "no-store" }),
-    fetch(`stock_metadata.json?_=${Date.now()}`, { cache: "no-store" })
+  const [response, metadataResponse] = await Promise.all([
+    fetch("data.json", { cache: "no-store" }),
+    fetch("stock_metadata.json", { cache: "no-store" })
   ]);
 
   if (!response.ok) {
     throw new Error(`Unable to load data.json (${response.status})`);
-  }
-
-  if (rsiResponse.ok) {
-    try {
-      const rawRsi = await rsiResponse.text();
-      rsiData = JSON.parse(rawRsi);
-      if (!Array.isArray(rsiData)) rsiData = [];
-      rsiBySymbol = new Map(
-        rsiData
-          .filter(item => item && item.Symbol)
-          .map(item => [normalizeSymbol(item.Symbol), item])
-      );
-    } catch (error) {
-      console.warn("Unable to load rsi_data.json:", error);
-      rsiData = [];
-      rsiBySymbol = new Map();
-    }
   }
 
   if (metadataResponse.ok) {
@@ -83,23 +67,13 @@ async function loadData() {
     throw new Error("data.json does not contain sector data.");
   }
 
-  const updatedAt = new Date();
-
-  const updatedTime = updatedAt.toLocaleTimeString("en-IN", {
-    timeZone: "Asia/Kolkata",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false
-  });
-
   latestDate.textContent =
-    "Latest: " +
-    formatDate(appData.latest_date || "") +
-    " • " +
-    updatedTime +
-    " IST";
+    "Latest data: " + formatDate(appData.latest_date || "");
 
   populateSectors();
+  updateCustomDateControls();
+  updatePeriodRangeLabel();
+  updatePeriodNavigationButtons();
   render();
 }
 
@@ -115,16 +89,271 @@ function populateSectors() {
       sectorSelect.appendChild(option);
     });
 
-  if (appData.sectors.nifty100) {
+  if (appData.sectors.nifty500) {
+    sectorSelect.value = "nifty500";
+  } else if (appData.sectors.nifty100) {
     sectorSelect.value = "nifty100";
   }
 }
 
-function render(focusSymbol = null) {
+
+const customDateControls = document.getElementById("customDateControls");
+const startDateInput = document.getElementById("startDate");
+const endDateInput = document.getElementById("endDate");
+
+function getBaseYtdData(sector) {
+  return appData.sectors?.[sector]?.YTD || null;
+}
+
+function getAvailableDates(periodData) {
+  return (periodData?.dates || [])
+    .map(v => String(v).slice(0, 10))
+    .filter(Boolean);
+}
+
+function rebaseSeries(values, startIndex, endIndex) {
+  const base = Number(values[startIndex]);
+  if (!Number.isFinite(base)) return [];
+
+  const result = [];
+  for (let i = startIndex; i <= endIndex; i++) {
+    const value = Number(values[i]);
+    result.push(
+      Number.isFinite(value)
+        ? ((1 + value / 100) / (1 + base / 100) - 1) * 100
+        : null
+    );
+  }
+  return result;
+}
+
+function buildFilteredPeriodData(baseData, startDate, endDate) {
+  const dates = getAvailableDates(baseData);
+  let startIndex = dates.indexOf(startDate);
+  let endIndex = dates.lastIndexOf(endDate);
+
+  if (startIndex < 0) {
+    startIndex = dates.findIndex(d => d >= startDate);
+  }
+  if (endIndex < 0) {
+    for (let i = dates.length - 1; i >= 0; i--) {
+      if (dates[i] <= endDate) {
+        endIndex = i;
+        break;
+      }
+    }
+  }
+
+  if (startIndex < 0 || endIndex < 0 || startIndex > endIndex) return null;
+
+  const result = {
+    ...baseData,
+    dates: dates.slice(startIndex, endIndex + 1),
+    series: {},
+    stocks: {}
+  };
+
+  Object.entries(baseData.series || {}).forEach(([symbol, values]) => {
+    result.series[symbol] = rebaseSeries(values, startIndex, endIndex);
+  });
+
+  Object.entries(baseData.stocks || {}).forEach(([symbol, info]) => {
+    const series = result.series[symbol] || [];
+    const valid = series.filter(v => Number.isFinite(Number(v)));
+    const performance = valid.length ? Number(valid[valid.length - 1]) : null;
+    result.stocks[symbol] = {...info, performance};
+  });
+
+  const ranked = Object.entries(result.stocks)
+    .filter(([, info]) => Number.isFinite(Number(info.performance)))
+    .sort((a, b) => Number(b[1].performance) - Number(a[1].performance))
+    .map(([symbol]) => symbol);
+
+  result.top5 = ranked.slice(0, 5);
+  result.top10 = ranked.slice(0, 10);
+  result.sector_benchmark = baseData.sector_benchmark
+    ? {
+        ...baseData.sector_benchmark,
+        dates: dates.slice(startIndex, endIndex + 1),
+        series: rebaseSeries(
+          baseData.sector_benchmark.series || [],
+          startIndex,
+          endIndex
+        )
+      }
+    : baseData.sector_benchmark;
+
+  return result;
+}
+
+function getPeriodWindow(period, endDate) {
+  if (!endDate) return null;
+
+  if (period === "CUSTOM") {
+    if (!startDateInput?.value || !endDateInput?.value) return null;
+    return { start: startDateInput.value, end: endDateInput.value };
+  }
+
+  const end = new Date(endDate + "T00:00:00");
+  let daysBack = 0;
+
+  if (period === "1W") daysBack = 6;
+  else if (period === "1M") daysBack = 30;
+  else if (period === "3M") daysBack = 90;
+  else if (period === "6M") daysBack = 180;
+  else if (period === "YTD") {
+    return { start: `${end.getFullYear()}-01-01`, end: endDate };
+  }
+  else return null;
+
+  end.setDate(end.getDate() - daysBack);
+  return {
+    start: end.toISOString().slice(0, 10),
+    end: endDate
+  };
+}
+
+function getNavigationDates() {
+  const base = appData?.sectors?.[sectorSelect.value]?.YTD;
+  return getAvailableDates(base);
+}
+
+function getCurrentPeriodEndDate() {
+  const dates = getNavigationDates();
+  if (!dates.length) return null;
+
+  if (periodSelect.value === "CUSTOM" && endDateInput?.value) return endDateInput.value;
+  if (periodEndDateOverride && dates.includes(periodEndDateOverride)) return periodEndDateOverride;
+  return dates[dates.length - 1];
+}
+
+function buildPeriodData(sector, period) {
+  const base = getBaseYtdData(sector);
+  if (!base?.dates?.length) return null;
+
+  if (period === "CUSTOM") {
+    if (!startDateInput?.value || !endDateInput?.value) return null;
+    return buildFilteredPeriodData(base, startDateInput.value, endDateInput.value);
+  }
+
+  if (periodEndDateOverride || period === "1W") {
+    const end = getCurrentPeriodEndDate();
+    const window = getPeriodWindow(period, end);
+    if (window) return buildFilteredPeriodData(base, window.start, window.end);
+  }
+
+  return appData.sectors?.[sector]?.[period] || null;
+}
+
+function updatePeriodRangeLabel() {
+  if (!periodRangeLabel) return;
+  const period = periodSelect.value;
+  const dates = getNavigationDates();
+  if (!dates.length) { periodRangeLabel.textContent = ""; return; }
+
+  const end = getCurrentPeriodEndDate();
+  const window = getPeriodWindow(period, end);
+  if (!window) { periodRangeLabel.textContent = ""; return; }
+
+  periodRangeLabel.textContent = `${formatDate(window.start)} → ${formatDate(window.end)}`;
+}
+
+function movePeriodByOneDay(direction) {
+  const dates = getNavigationDates();
+  if (!dates.length) return;
+
+  const currentEnd = getCurrentPeriodEndDate();
+  let index = dates.indexOf(currentEnd);
+  if (index < 0) index = dates.length - 1;
+
+  const nextIndex = index + direction;
+  if (nextIndex < 0 || nextIndex >= dates.length) return;
+
+  const nextEnd = dates[nextIndex];
+
+  if (periodSelect.value === "CUSTOM") {
+    const start = new Date(startDateInput.value + "T00:00:00");
+    const end = new Date(endDateInput.value + "T00:00:00");
+    start.setDate(start.getDate() + direction);
+    end.setDate(end.getDate() + direction);
+    const nextStart = start.toISOString().slice(0, 10);
+    const nextEndDate = end.toISOString().slice(0, 10);
+
+    if (dates.some(d => d === nextStart) && dates.some(d => d === nextEndDate)) {
+      startDateInput.value = nextStart;
+      endDateInput.value = nextEndDate;
+    }
+  } else {
+    periodEndDateOverride = nextEnd;
+  }
+
+  updatePeriodRangeLabel();
+  render();
+  updatePeriodNavigationButtons();
+}
+
+function updatePeriodNavigationButtons() {
+  const dates = getNavigationDates();
+  if (!dates.length) return;
+  const index = dates.indexOf(getCurrentPeriodEndDate());
+  if (periodPrev) periodPrev.disabled = index <= 0;
+  if (periodNext) periodNext.disabled = index < 0 || index >= dates.length - 1;
+}
+
+
+function buildBenchmarkPeriodData(kind, period) {
+  if (period === "1W" || period === "CUSTOM") {
+    const base = appData.benchmarks?.[kind]?.periods?.YTD;
+    if (!base) return null;
+    const start = period === "CUSTOM" ? startDateInput.value : (() => {
+      const dates = getAvailableDates(base);
+      const end = dates[dates.length - 1];
+      const d = new Date(end + "T00:00:00");
+      d.setDate(d.getDate() - 6);
+      return d.toISOString().slice(0, 10);
+    })();
+    return buildFilteredPeriodData(
+      {dates: base.dates, series: {__benchmark__: base.series}},
+      start,
+      period === "CUSTOM" ? endDateInput.value : getAvailableDates(base).at(-1)
+    ) && (() => {
+      const filtered = buildFilteredPeriodData(
+        {dates: base.dates, series: {__benchmark__: base.series}},
+        start,
+        period === "CUSTOM" ? endDateInput.value : getAvailableDates(base).at(-1)
+      );
+      if (!filtered) return null;
+      return {
+        ...base,
+        dates: filtered.dates,
+        series: filtered.series.__benchmark__,
+        performance: filtered.series.__benchmark__.at(-1)
+      };
+    })();
+  }
+  return appData.benchmarks?.[kind]?.periods?.[period] || null;
+}
+
+function updateCustomDateControls() {
+  const custom = periodSelect.value === "CUSTOM";
+  if (customDateControls) customDateControls.hidden = !custom;
+
+  if (custom && appData?.latest_date) {
+    const latest = String(appData.latest_date).slice(0, 10);
+    if (endDateInput && !endDateInput.value) endDateInput.value = latest;
+    if (startDateInput && !startDateInput.value) {
+      const d = new Date(latest + "T00:00:00");
+      d.setDate(d.getDate() - 30);
+      startDateInput.value = d.toISOString().slice(0, 10);
+    }
+  }
+}
+
+function render() {
   const sector = sectorSelect.value;
   const period = periodSelect.value;
   const count = Number(stocksSelect.value);
-  const periodData = appData.sectors?.[sector]?.[period];
+  const periodData = buildPeriodData(sector, period);
 
   if (!periodData) {
     destroyChart();
@@ -140,24 +369,11 @@ function render(focusSymbol = null) {
     periodData.series && Array.isArray(periodData.series[symbol])
   );
 
-  // When an RSI alert is clicked, keep that stock in the chart and
-  // fill the remaining slots with the sector's normal top peers.
-  if (focusSymbol) {
-    const focused = normalizeSymbol(focusSymbol);
-    const matchingSymbol = Object.keys(periodData.series || {})
-      .find(symbol => normalizeSymbol(symbol) === focused);
 
-    if (matchingSymbol) {
-      symbols = [
-        matchingSymbol,
-        ...symbols.filter(symbol => normalizeSymbol(symbol) !== focused)
-      ].slice(0, count);
-    }
-  }
 
   if (!symbols.length) {
     destroyChart();
-    chartTitle.textContent = `${getSectorName(sector)} — ${period}`;
+    chartTitle.textContent = `${getSectorName(sector)} — ${period === "CUSTOM" ? `${startDateInput.value} to ${endDateInput.value}` : period}`;
     chartSubtitle.textContent = "No stock data available";
     legend.innerHTML = "";
     performanceTable.innerHTML = "";
@@ -175,32 +391,7 @@ function render(focusSymbol = null) {
   drawTable(symbols, periodData);
   drawBenchmarkCards(sector, period);
   drawSectorRanking(period);
-  drawRsiAlerts();
 }
-
-const rsiAlertLabelPlugin = {
-  id: "rsiAlertLabel",
-  afterDatasetsDraw(chartInstance) {
-    const ctx = chartInstance.ctx;
-    ctx.save();
-    ctx.font = "600 12px Arial";
-    ctx.fillStyle = "#dc2626";
-    ctx.textBaseline = "middle";
-
-    chartInstance.data.datasets.forEach((dataset, datasetIndex) => {
-      if (!dataset.rsiAlert) return;
-      const meta = chartInstance.getDatasetMeta(datasetIndex);
-      const point = meta.data.find(Boolean);
-      if (!point) return;
-
-      const position = point.getProps(["x", "y"], true);
-      const label = `RSI < 35 (${Number(dataset.rsiValue).toFixed(1)})`;
-      ctx.fillText(label, position.x + 12, position.y);
-    });
-
-    ctx.restore();
-  }
-};
 
 function drawChart(labels, symbols, periodData, period) {
   destroyChart();
@@ -225,49 +416,12 @@ function drawChart(labels, symbols, periodData, period) {
     };
   });
 
-  // Add a star marker at the latest available chart point when the
-  // latest hourly RSI from rsi-dashboard is below 35.
-  symbols.forEach((symbol, index) => {
-    const rsiItem = rsiBySymbol.get(normalizeSymbol(symbol));
-    const rsi = Number(rsiItem?.["Current Hourly RSI"]);
-    if (!Number.isFinite(rsi) || rsi >= 35) return;
 
-    const values = periodData.series[symbol].map(v => {
-      const n = Number(v);
-      return Number.isFinite(n) ? n : null;
-    });
-    let lastIndex = -1;
-    for (let i = values.length - 1; i >= 0; i--) {
-      if (values[i] !== null) {
-        lastIndex = i;
-        break;
-      }
-    }
-    if (lastIndex < 0) return;
-
-    const alertPoints = values.map((value, i) => i === lastIndex ? value : null);
-    datasets.push({
-      label: `${symbol} ⭐ RSI < 35`,
-      data: alertPoints,
-      borderWidth: 0,
-      backgroundColor: "#dc2626",
-      pointBackgroundColor: "#dc2626",
-      pointBorderColor: "#ffffff",
-      pointBorderWidth: 2,
-      pointRadius: 9,
-      pointHoverRadius: 11,
-      pointStyle: "star",
-      showLine: false,
-      spanGaps: false,
-      rsiAlert: true,
-      rsiValue: rsi
-    });
-  });
 
   const benchmarkDefinitions = [
-    ["Nifty 50", appData.benchmarks?.nifty50?.periods?.[period], benchmarkColors.nifty50],
+    ["Nifty 50", buildBenchmarkPeriodData("nifty50", period), benchmarkColors.nifty50],
     [getSectorName(sectorSelect.value), periodData.sector_benchmark, benchmarkColors.sector],
-    ["Nifty 500", appData.benchmarks?.nifty500?.periods?.[period], benchmarkColors.nifty500]
+    ["Nifty 500", buildBenchmarkPeriodData("nifty500", period), benchmarkColors.nifty500]
   ];
 
   benchmarkDefinitions.forEach(([label, benchmark, color]) => {
@@ -296,7 +450,6 @@ function drawChart(labels, symbols, periodData, period) {
     {
       type: "line",
       data: { labels, datasets },
-      plugins: [rsiAlertLabelPlugin],
       options: {
         responsive: true,
         maintainAspectRatio: false,
@@ -306,9 +459,6 @@ function drawChart(labels, symbols, periodData, period) {
           tooltip: {
             callbacks: {
               label: context => {
-                if (context.dataset.rsiAlert) {
-                  return `${context.dataset.label}: ${Number(context.dataset.rsiValue).toFixed(2)}`;
-                }
                 const value = context.parsed.y;
                 return value == null
                   ? `${context.dataset.label}: N/A`
@@ -393,9 +543,10 @@ function addLegendItem(label, color, dashed, href = null) {
 function drawBenchmarkCards(sector, period) {
   benchmarkCards.innerHTML = "";
 
-  const selected = appData.sectors?.[sector]?.[period]?.sector_benchmark;
-  const nifty50 = appData.benchmarks?.nifty50?.periods?.[period];
-  const nifty500 = appData.benchmarks?.nifty500?.periods?.[period];
+  const periodData = buildPeriodData(sector, period);
+  const selected = periodData?.sector_benchmark;
+  const nifty50 = buildBenchmarkPeriodData("nifty50", period);
+  const nifty500 = buildBenchmarkPeriodData("nifty500", period);
 
   const cards = [
     {
@@ -440,7 +591,22 @@ function drawSectorRanking(period) {
   sectorRanking.innerHTML = "";
 
   // Keep this section compact: show only the 10 strongest sectors.
-  const ranking = (appData.sector_performance?.[period] || []).slice(0, 10);
+  let ranking;
+  if (period === "1W" || period === "CUSTOM") {
+    ranking = Object.keys(appData.sectors || {})
+      .map(sector => {
+        const pd = buildPeriodData(sector, period);
+        const series = pd?.sector_benchmark?.series || [];
+        const valid = series.filter(v => Number.isFinite(Number(v)));
+        const performance = valid.length ? Number(valid[valid.length - 1]) : null;
+        return {sector, performance};
+      })
+      .filter(item => Number.isFinite(item.performance))
+      .sort((a, b) => b.performance - a.performance)
+      .slice(0, 10);
+  } else {
+    ranking = (appData.sector_performance?.[period] || []).slice(0, 10);
+  }
   const maxAbs = Math.max(
     1,
     ...ranking.map(item => Math.abs(Number(item.performance) || 0))
@@ -458,7 +624,7 @@ function drawSectorRanking(period) {
 
     row.innerHTML = `
       <div class="sector-rank">${index + 1}</div>
-      <div class="sector-name">${escapeHtml(item.name)}</div>
+      <div class="sector-name">${escapeHtml(item.name || getSectorName(item.sector))}</div>
       <div class="sector-bar-wrap">
         <div class="sector-bar ${positive ? "positive" : "negative"}" style="width:${width}%"></div>
       </div>
@@ -539,110 +705,11 @@ function scoreSectorForIndustry(sector, industry) {
   return score;
 }
 
-function findSectorForSymbol(symbol, period) {
-  const target = normalizeSymbol(symbol);
-  const metadata = stockMetadata[target] || {};
-  const industry = metadata.industry || "";
-  const metadataSectors = Array.isArray(metadata.sectors) ? metadata.sectors : [];
-
-  const candidates = [];
-
-  for (const sector of Object.keys(appData.sectors || {})) {
-    const periodData = appData.sectors?.[sector]?.[period];
-    if (!periodData) continue;
-
-    const symbols = Object.keys(periodData.series || {});
-    if (symbols.some(item => normalizeSymbol(item) === target)) {
-      candidates.push(sector);
-    }
-  }
-
-  if (!candidates.length) return null;
-
-  // First prefer sectors explicitly listed in stock_master.xlsx.
-  const masterCandidates = candidates.filter(sector =>
-    metadataSectors.includes(sector)
-  );
-
-  const pool = masterCandidates.length ? masterCandidates : candidates;
-
-  // Industry is used to choose the actual sector rather than Nifty 500.
-  const ranked = pool
-    .map(sector => ({
-      sector,
-      score: scoreSectorForIndustry(sector, industry)
-    }))
-    .sort((a, b) => b.score - a.score);
-
-  return ranked[0]?.sector || pool[0];
-}
-
-function drawRsiAlerts() {
-  const container = document.getElementById("rsiAlerts");
-  const count = document.getElementById("rsiAlertCount");
-  if (!container) return;
-
-  const period = periodSelect.value;
-  const alerts = rsiData
-    .map(item => {
-      const symbol = normalizeSymbol(item?.Symbol);
-      const rsi = Number(item?.["Current Hourly RSI"]);
-      return {
-        symbol,
-        rsi,
-        sector: symbol ? findSectorForSymbol(symbol, period) : null
-      };
-    })
-    .filter(item => item.symbol && Number.isFinite(item.rsi) && item.rsi < 35 && item.sector)
-    .sort((a, b) => a.rsi - b.rsi);
-
-  if (count) {
-    count.textContent = `${alerts.length} stock${alerts.length === 1 ? "" : "s"}`;
-  }
-
-  container.innerHTML = "";
-
-  if (!alerts.length) {
-    container.innerHTML = '<div class="rsi-alert-empty">No stocks currently have 1H RSI below 35.</div>';
-    return;
-  }
-
-  alerts.forEach(item => {
-    const row = document.createElement("tr");
-    const chartUrl = `https://chartink.com/stocks/${encodeURIComponent(item.symbol)}.html`;
-
-    row.innerHTML = `
-      <td>
-        <a href="#" class="rsi-symbol-link" data-symbol="${escapeHtml(item.symbol)}"
-           title="Open ${escapeHtml(getSectorName(item.sector))} chart">
-          ${escapeHtml(item.symbol)}
-        </a>
-      </td>
-      <td class="return-negative">${item.rsi.toFixed(1)}</td>
-      <td class="return-negative">🔴 RSI &lt; 35</td>
-      <td><a href="${chartUrl}" target="_blank" rel="noopener noreferrer">Open ChartInk ↗</a></td>
-    `;
-
-    const symbolLink = row.querySelector(".rsi-symbol-link");
-    symbolLink.addEventListener("click", event => {
-      event.preventDefault();
-      sectorSelect.value = item.sector;
-      render(item.symbol);
-      document.querySelector(".chart-card")?.scrollIntoView({
-        behavior: "smooth",
-        block: "start"
-      });
-    });
-
-    container.appendChild(row);
-  });
-}
-
 function drawTable(symbols, periodData) {
   performanceTable.innerHTML = "";
 
   const nifty50 = Number(
-    appData.benchmarks?.nifty50?.periods?.[periodSelect.value]?.performance
+    buildBenchmarkPeriodData("nifty50", periodSelect.value)?.performance
   );
 
   symbols.forEach((symbol, index) => {
@@ -735,8 +802,37 @@ document.querySelectorAll(".section-toggle").forEach(button => {
   });
 });
 
-sectorSelect.addEventListener("change", render);
-periodSelect.addEventListener("change", render);
+sectorSelect.addEventListener("change", () => {
+  periodEndDateOverride = null;
+  updateCustomDateControls();
+  updatePeriodRangeLabel();
+  updatePeriodNavigationButtons();
+  render();
+});
+periodSelect.addEventListener("change", () => {
+  periodEndDateOverride = null;
+  updateCustomDateControls();
+  updatePeriodRangeLabel();
+  updatePeriodNavigationButtons();
+  render();
+});
+startDateInput?.addEventListener("change", () => {
+  if (periodSelect.value === "CUSTOM") {
+    updatePeriodRangeLabel();
+    updatePeriodNavigationButtons();
+    render();
+  }
+});
+endDateInput?.addEventListener("change", () => {
+  if (periodSelect.value === "CUSTOM") {
+    updatePeriodRangeLabel();
+    updatePeriodNavigationButtons();
+    render();
+  }
+});
+
+periodPrev?.addEventListener("click", () => movePeriodByOneDay(-1));
+periodNext?.addEventListener("click", () => movePeriodByOneDay(1));
 stocksSelect.addEventListener("change", render);
 
 loadData().catch(error => {
@@ -745,8 +841,3 @@ loadData().catch(error => {
   chartTitle.textContent = "Unable to load dashboard";
   chartSubtitle.textContent = error.message;
 });
-
-// Automatically reload the dashboard every 5 minutes.
-setInterval(() => {
-  window.location.reload();
-}, 5 * 60 * 1000);
