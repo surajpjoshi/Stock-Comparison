@@ -17,6 +17,67 @@ const performanceTable = document.getElementById("performanceTable");
 const benchmarkCards = document.getElementById("benchmarkCards");
 const sectorRanking = document.getElementById("sectorRanking");
 
+// GitHub Actions workflow used to update the dashboard.
+const GITHUB_WORKFLOW_RUNS_URL =
+  "https://api.github.com/repos/surajpjoshi/Stock-Comparison/actions/workflows/daily_stock_update.yml/runs?per_page=1";
+
+async function loadGitHubLastRunTime() {
+  try {
+    const response = await fetch(GITHUB_WORKFLOW_RUNS_URL, {
+      cache: "no-store",
+      headers: {
+        Accept: "application/vnd.github+json"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`GitHub API returned ${response.status}`);
+    }
+
+    const data = await response.json();
+    const run = data.workflow_runs?.[0];
+
+    if (!run) {
+      throw new Error("No GitHub Actions runs found.");
+    }
+
+    const runDate = new Date(run.run_started_at || run.created_at);
+
+    if (Number.isNaN(runDate.getTime())) {
+      throw new Error("Invalid GitHub Actions run time.");
+    }
+
+    const parts = new Intl.DateTimeFormat("en-IN", {
+      timeZone: "Asia/Kolkata",
+      day: "2-digit",
+      month: "short",
+      year: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    }).formatToParts(runDate);
+
+    const getPart = type =>
+      parts.find(part => part.type === type)?.value || "";
+
+    const dateText =
+      `${getPart("day")} ${getPart("month")} ${getPart("year")}`;
+
+    const timeText =
+      `${getPart("hour")}:${getPart("minute")}:${getPart("second")}`;
+
+    latestDate.textContent =
+      `Latest data: ${formatDate(appData?.latest_date || "")} • Last updated: ${timeText} IST`;
+
+    latestDate.title =
+      `GitHub Actions: ${dateText} ${timeText} IST`;
+
+  } catch (error) {
+    console.warn("Unable to get GitHub Actions last run time:", error);
+  }
+}
+
 const lineColors = [
   "#2563eb", "#dc2626", "#059669", "#d97706", "#7c3aed",
   "#0891b2", "#db2777", "#65a30d", "#9333ea", "#475569"
@@ -69,6 +130,9 @@ async function loadData() {
 
   latestDate.textContent =
     "Latest data: " + formatDate(appData.latest_date || "");
+
+  // Show the actual time of the latest GitHub Actions update.
+  loadGitHubLastRunTime();
 
   populateSectors();
   updateCustomDateControls();
